@@ -5,13 +5,12 @@
    Сравнить её с суммой, полученной параллельно.
 */
 
-#include <iostream>
 #include <mpi.h>
-#include <cassert>
+#include <assert.h>
 #include <stdint.h>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 ///////////////////////////////
 // Запись частичных сумм
@@ -25,7 +24,7 @@ void write_results(int id, uint64_t result) {
 
 int main (int argc, char** argv) {
 	
-	const uint32_t N = std::atoi(argv[1]);		// размер массива
+	const uint32_t N = atoi(argv[1]);		// размер массива
 	
 	// Инициализация MPI
 	if (MPI_Init (NULL, NULL) != MPI_SUCCESS) {
