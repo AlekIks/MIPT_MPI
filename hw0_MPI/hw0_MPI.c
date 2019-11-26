@@ -38,8 +38,10 @@ int main (int argc, char** argv) {
 	
 	// Информация о разделении массива
 	const uint32_t num_workers = world_size - 1;	// кол-во "работников"
-	const uint32_t num_for_main = N % num_workers;	// избыток посчитает "основной"
-	const uint32_t num_elem_per_worker = (N - num_for_main) / num_workers;
+	const uint32_t num_for_main = (num_workers == 0) ? 
+			0 : N % num_workers;	// избыток посчитает "основной"
+	const uint32_t num_elem_per_worker = (num_workers == 0) ?
+			0 : (N - num_for_main) / num_workers;
 	uint64_t loc_sum = 0;				// частичная сумма, локальная
 
 	// "Основной" процесс
@@ -94,7 +96,7 @@ int main (int argc, char** argv) {
 		}
 
 		// сверяется с корректной суммой
-		printf("Верная сумма равна %d, мы получили %d\n", check_summ, loc_sum );
+		printf("Верная сумма равна %ld, мы получили %ld\n", check_summ, loc_sum );
 		loc_sum == check_summ ? printf("Success!!!!\n") : printf("epic fail\n");
 	}
 	// Процессы для подчета частичных сумм, "работники"
