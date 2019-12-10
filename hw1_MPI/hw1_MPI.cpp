@@ -6,12 +6,12 @@
 #include <fstream>
 #include <fcntl.h>
 #include <limits.h>
+#include <mpi.h>
 #include <unistd.h>
 
 ////////////////////////////////////
 //// Команды
 
-// NOCOMMAND нужна для корректой работы map
 enum COMMANDS {NOCOMMAND, START, RUN, STOP, STATUS, RESET, QUIT, HELP, RANDOM, CSV,
         ADD_STEPS};
 std::map <std::string, COMMANDS> commands = {
@@ -31,16 +31,22 @@ std::map <std::string, COMMANDS> commands = {
 /// Мастер будет отдавать подмастерью приказы
 
 struct Order {
+    Order() = default;
+    Order(COMMANDS command) : command(command) {};
     Order(COMMANDS command, uint32_t steps) : command(command), new_steps(steps) {};
+    Order(COMMANDS command, uint32_t steps, uint32_t fs) :
+        command(command),
+        new_steps(steps),
+        finished_steps(fs){};
     COMMANDS command = NOCOMMAND;
     uint32_t new_steps = 0;
-
+    uint32_t finished_steps = 0;
 };
 
 ///////////////////////////////////
 /// Переход по правилам игры
 
-char next_step_cell(char* TABLE, int N, int M, int pos) {
+char next_step_cell(const char* TABLE, int N, int M, int pos) {
     char table [N][M];
     for (uint32_t i = 0; i < N; i ++) {
         for (uint32_t j = 0; j < M; j ++) {
@@ -102,6 +108,10 @@ int main(int argc, char* argv[]) {
              * @result: готовое к игре поле TABLE
              */
             case START: {
+                if (is_game_started) {
+                    perror("Игра уже была инициализирована.");
+                    continue;
+                }
                 std::cin >> N >> M;
 
                 std::string init_status;
@@ -165,7 +175,7 @@ int main(int argc, char* argv[]) {
              */
             case RUN: {
                 if (!is_game_started) {                     // Если игра не началась - надо начать
-                    perror("Сначала начните игру.");
+                    std::cout << "Сначала начните игру.";
                     break;
                 }
 
@@ -177,6 +187,16 @@ int main(int argc, char* argv[]) {
                     Order add_steps_order (
                             ADD_STEPS,
                             steps_num);
+                    MPI_Request req;
+                    MPI_Isend(
+                                &add_steps_order,     // шлем приказ
+                                sizeof(Order),
+                                MPI_CHAR,
+                                1,              // подмастерью
+                                0,
+                                MPI_COMM_WORLD,
+                                &req
+                            );
                     break;
                 }
 
@@ -199,64 +219,200 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Информация о построчном разделении игровой таблицы
+                // Основные идеи:
+                // 1. Подмастерье сам считает ход для первой и последней
+                // строк и для остатка.
+                // 2. Работники получают по две строки, из которых могут
+                // только читать, и еще num_elem_per_worker строк, для
+                // которых вернут значение следующего хода
                 const uint32_t num_workers = world_size - 2;	// кол-во "работников"
-                const uint32_t num_for_craftsman = N % num_workers;	// избыток посчитает "подмастерье"
-                const uint32_t num_elem_per_worker = (N - num_for_craftsman) / num_workers;
+                const uint32_t num_for_submaster = (N - 2) % num_workers;	// избыток для "подмастерья"
+                const uint32_t num_elem_per_worker = (N - 2 - num_for_submaster) / num_workers;
 
                 switch(world_id) {
-                    // "Мастер" пойдет дальше принимать команды
+                    ////////////////////////////////////////////////////////////////
+                    ///////// "Мастер" пойдет дальше принимать команды
                     case 0: {
                         break;
                     }
-                    // "Подмастерье"
+                    ////////////////////////////////////////////////////////////////
+                    ///////// "Подмастерье"
                     case 1: {
+
+                        int steps_to_do = steps_num;  // оставшиеся шаги
+                        Order master_order; // приказы мастера
+
                         while(true) {
-                            // рассылает подстроки
-                            for (int i = 0; i < num_workers; i ++) {
-                                if (MPI_Send(
-                                        TABLE + i * (num_elem_per_worker) * M - M, // TABLE + offset - одна read-only строка
-                                        num_elem_per_worker * M + 2 * M,   // кол-во элементов на "работника" + 2 r-o строки
-                                        MPI_CHAR,		// тип
-                                        i + 2,			// кому шлём
-                                        0,			// тэг
-                                        MPI_COMM_WORLD		// группа
-                                )  != MPI_SUCCESS) {
-                                    perror("Ошибка передачи работнику\n");
+                            if (steps_to_do > 0) {
+                                // рассылает подстроки
+                                for (int i = 0; i < num_workers; i ++) {
+                                    if (MPI_Send(
+                                            TABLE + i * (num_elem_per_worker) * M, // TABLE + offset - одна read-only строка
+                                            // // кол-во элементов на "работника" + 2 read-only строки
+                                            num_elem_per_worker * M + 2 * M,
+                                            MPI_CHAR,		// тип
+                                            i + 2,			// кому шлём
+                                            0,			// тэг
+                                            MPI_COMM_WORLD		// группа
+                                    )  != MPI_SUCCESS) {
+                                        perror("Ошибка передачи работнику\n");
+                                    }
                                 }
+
+                                // считает свою часть
+                                // последние строки...
+                                char* next_step_TABLE = new char [N * M];
+                                for (uint32_t i = num_workers * num_elem_per_worker * M + M; i < M * N; i ++) {
+                                    next_step_TABLE[i] = next_step_cell(TABLE, N, M, i);
+                                }
+                                // ...и первую
+                                for (uint32_t i = 0; i < M; i ++) {
+                                    next_step_TABLE[i] = next_step_cell(TABLE, N, M, i);
+                                }
+
+                                // принимает куски таблицы от работников, сливает в одну
+                                for (int i = 0; i < num_workers; i ++) {
+                                    if (MPI_Recv(
+                                            next_step_TABLE + i * (num_elem_per_worker) * M + M, 	// куда пишем
+                                            num_elem_per_worker * M,			// кол-во элементов
+                                            MPI_CHAR, 		// тип
+                                            i + 2,	// от кого
+                                            0,			// тэг
+                                            MPI_COMM_WORLD,	// группа
+                                            MPI_STATUS_IGNORE	// флаг
+                                    ) != MPI_SUCCESS) {
+                                        perror("Ошибка получения от работника\n");
+                                    }
+                                }
+
+                                // обновляем данные
+                                used_configurations[TABLE] = cur_step;
+                                delete [] TABLE;
+                                TABLE = next_step_TABLE;
+                                cur_step ++;
+                                steps_to_do --;
+                            }
+
+                            //////////////////////////////////////
+
+                            MPI_Request req;
+                            MPI_Irecv(
+                                    &master_order,              // куда пишем
+                                    sizeof(Order),              // размер
+                                    MPI_CHAR,                   // тип
+                                    0,                   // от кого
+                                    MPI_ANY_TAG,                // флаг
+                                    MPI_COMM_WORLD,             // группа
+                                    &req
+                                    );
+                            int has_new_order = 0;
+                            // Если считать пока нечего - подождем приказа
+                            //if (steps_to_do == 0) {
+                            //    MPI_Wait(&req, MPI_STATUS_IGNORE);
+                            //}
+                            MPI_Test(&req, &has_new_order, MPI_STATUS_IGNORE);
+
+                            if (has_new_order) {
+                                switch(master_order.command){
+                                    /***
+                                     * ADD_STEPS
+                                     * Просто добавим шаги и продолжим работу
+                                     */
+                                    case ADD_STEPS: {
+                                        steps_to_do += master_order.new_steps;
+                                        break;
+                                    }
+                                        /***
+                                         * STATUS
+                                         * вернем сначала предответ (с указанием оставшегося количества шагов)
+                                         * Если можем вернуть таблицу - отправляем.
+                                         */
+                                    case STATUS: {
+                                        // Предответ
+                                        MPI_Request sub_req;
+                                        // можем выслать статус
+                                        if (MPI_Isend(
+                                                &TABLE,
+                                                N * M,
+                                                MPI_CHAR,		// тип
+                                                0,			// кому шлём
+                                                0,			// тэг
+                                                MPI_COMM_WORLD,		// группа
+                                                &sub_req
+                                        )  != MPI_SUCCESS) {
+                                            perror("Ошибка передачи STATUS мастеру\n");
+                                        }
+                                        break;
+                                    }
+                                        /***
+                                         * STOP, RESET, QUIT
+                                         * Просто отправим информацию о шагах, остальное сделает мастер
+                                         */
+                                    case STOP || RESET || QUIT: {
+                                        Order submaster_order(RUN, steps_to_do, cur_step);
+                                        if (MPI_Send(
+                                                &TABLE,
+                                                N * M,
+                                                MPI_CHAR,		// тип
+                                                0,			// кому шлём
+                                                0,			// тэг
+                                                MPI_COMM_WORLD		// группа
+                                        )  != MPI_SUCCESS) {
+                                            perror("Ошибка передачи submaster_order STOP мастеру\n");
+                                        }
+                                        break;
+                                    }
+                                    default: {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ////////////////////////////////////////////////////////////////
+                    ///////// Работник
+                    default: {
+                        printf("dsld;");
+                        char* worker_table = new char [num_elem_per_worker * M + 2 * M];
+                        while(true) {
+                            // принимает сообщения от подмастерья
+                            if (MPI_Recv(
+                                    worker_table,		// куда пишем
+                                    num_elem_per_worker * M + 2 * M,	// кол-во элементов
+                                    MPI_CHAR,		// тип
+                                    1,			// от кого
+                                    0,			// тэг?
+                                    MPI_COMM_WORLD,	// группа
+                                    MPI_STATUS_IGNORE	// флаг
+                            ) != MPI_SUCCESS) {
+                                perror("Ошибка получения от подмастерья\n");
+                                return 1;
                             }
 
                             // считает свою часть
-                            char* next_step_TABLE = new char [N * M];
-                            for (uint32_t i = num_workers * num_elem_per_worker * M; i < M * N; i ++) {
-                                next_step_TABLE[i] = next_step_cell(TABLE, N, M, i);
+                            char new_worker_table [num_elem_per_worker * M];
+                            for (uint32_t i = M; i < M + num_elem_per_worker * M; i ++) {
+                                new_worker_table[i] = next_step_cell(
+                                        worker_table,
+                                        num_elem_per_worker + 2,      // строк в куске
+                                        M,      // длина строки
+                                        i);
                             }
 
-                            // принимает куски таблицы от работников, сливает в одну
-                            for (int i = 0; i < num_workers; i ++) {
-                                if (MPI_Recv(
-                                        next_step_TABLE + i * (num_elem_per_worker) * M, 	// куда пишем
-                                        num_elem_per_worker,			// кол-во элементов
-                                        MPI_CHAR, 		// тип
-                                        i + 2,		// от кого
-                                        0,			// тэг?
-                                        MPI_COMM_WORLD,	// группа
-                                        MPI_STATUS_IGNORE	// флаг
-                                ) != MPI_SUCCESS) {
-                                    perror("Ошибка получения от работника\n");
-                                }
+                            // возвращает ответ подмастерью
+                            if (MPI_Send(
+                                    new_worker_table,     // откуда читаем
+                                    num_elem_per_worker * M, //сколько
+                                    MPI_CHAR,		// тип
+                                    1,			// кому шлём
+                                    0,			// тэг
+                                    MPI_COMM_WORLD		// группа
+                            )  != MPI_SUCCESS) {
+                                perror("Ошибка передачи работнику\n");
                             }
-
-                            // обновляем данные
-                            delete [] TABLE;
-                            TABLE = next_step_TABLE;
-                            cur_step ++;
-                            /*
-                             * Todo: если еще есть шаги, принимаем IRecv Order от мастера
-                             * Todo: MPI Test, ничего не прилетело - продолжаем вычислять
-                             * Todo: если шагов не осталось - повиснуть на MPI Wait, ждать Order
-                             * todo: обработчики разных приказов
-                             */
                         }
+                        delete [] worker_table;
+                        break;
                     }
                 }
                 break;
@@ -272,16 +428,57 @@ int main(int argc, char* argv[]) {
                 break;
             }
             case STATUS: {
-                /*
-                 * todo: отправлять Order подмастерью
-                 */
                 if (!is_game_started) {
                     std::cout << "Игра еще не началась." << "\n";
+                    break;
                 }
+                // если игра не запущена, можно узнать статус
+                // прямиком от мастера
                 if (!is_game_running) {
                     for (uint32_t i = 0; i < N; i++) {
                         for (uint32_t j = 0; j < M; j++) {
-                            std::cout << TABLE[i * N + j] << " ";
+                            std::cout << TABLE[i * M + j] << " ";
+                        }
+                        std::cout << "\n";
+                    }
+                    break;
+                }
+
+                Order get_status_order(STATUS);
+                MPI_Request req;
+                if (MPI_Isend(
+                        &get_status_order,
+                        sizeof(Order),
+                        MPI_CHAR,
+                        1,
+                        0,
+                        MPI_COMM_WORLD,
+                        &req
+                        ) != MPI_SUCCESS) {
+                    perror("Ошибка попытки получения STATUS");
+                }
+
+                MPI_Request status_req;
+                MPI_Irecv(
+                        &TABLE,
+                        N * M,
+                        MPI_CHAR,
+                        1,
+                        0,
+                        MPI_COMM_WORLD,
+                        &status_req
+                );
+
+                int is_status_ready = 0;
+                MPI_Test(&status_req, &is_status_ready, MPI_STATUS_IGNORE);
+
+                if (!is_status_ready) {
+                    std::cout << "В данный момент производится просчет итераций\n";
+                }
+                else {
+                    for (uint32_t i = 0; i < N; i++) {
+                        for (uint32_t j = 0; j < M; j++) {
+                            std::cout << TABLE[i * M + j] << " ";
                         }
                         std::cout << "\n";
                     }
