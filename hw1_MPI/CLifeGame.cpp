@@ -69,8 +69,12 @@ void CLifeGame::Start(uint32_t n, uint32_t m, const std::string& init_status) {
 
     // это общие для всех параметры
     N = n, M = m;
-    TABLE = new char[N * M + 2];
     is_game_started = true;
+    // полная таблица хранится только у
+    // мастера и подмастерья
+    if (world_id == 0 || world_id == 1) {
+        TABLE = new char[N * M];
+    }
 
     if (world_id) {             // обрабатывает команды мастер
         return;
@@ -184,9 +188,11 @@ void CLifeGame::Run(uint32_t steps_num) {
         ////////////////////////////////////////////////////////////////
         ///////// "Подмастерье"
         case 1: {
+            int cur_step = 0;
             int steps_to_do = steps_num;  // оставшиеся шаги
             Order master_order; // приказы мастера
 
+            // получаем таблицу
             if (MPI_Recv(
                     TABLE,
                     N * M,
@@ -205,7 +211,7 @@ void CLifeGame::Run(uint32_t steps_num) {
                     for (int i = 0; i < num_workers; i ++) {
                         if (MPI_Send(
                                 TABLE + i * (num_elem_per_worker) * M, // TABLE + offset - одна read-only строка
-                                // // кол-во элементов на "работника" + 2 read-only строки
+                                // кол-во элементов на "работника" + 2 read-only строки
                                 num_elem_per_worker * M + 2 * M,
                                 MPI_CHAR,		// тип
                                 i + 2,			// кому шлём
@@ -291,22 +297,80 @@ void CLifeGame::Run(uint32_t steps_num) {
                                     0,			// тэг
                                     MPI_COMM_WORLD		// группа
                             );
-
+                            break;
                         }
                         /***
-                         * STOP, RESET, QUIT
+                         * RESET и QUIT реализованы в STOP,
+                         * здесь проходим дальше
+                         */
+                        case RESET: {}
+                        case QUIT:{}
+                        /***
+                         * STOP
                          * Просто отправим информацию о шагах, остальное сделает мастер
                          */
-                        case STOP || RESET || QUIT: {
-                            Order submaster_order(RUN, steps_to_do, cur_step);
+                        case STOP: {
+                            Order submaster_ans(RUN, steps_to_do, cur_step);
                             MPI_Send(
-                                    TABLE,
-                                    N * M,
+                                    &submaster_ans,
+                                    sizeof(Order),
                                     MPI_CHAR,		// тип
                                     0,			// кому шлём
                                     0,			// тэг
                                     MPI_COMM_WORLD		// группа
                             );
+                            // Обнуляем значения шагов
+                            steps_to_do = 0;
+                            cur_step = 0;
+                            if (master_order.command == STOP) {
+                                break;
+                            }
+
+
+                            // Для QUIT нужно остановить работников...
+                            if (master_order.command == QUIT) {
+                                // пересылаем строку со спецсимволом
+                                TABLE[0] = '#';
+
+                                for (int i = 0; i < num_workers; i ++) {
+                                    if (MPI_Send(
+                                            TABLE,
+                                            num_elem_per_worker * M + M * 2,
+                                            MPI_CHAR,
+                                            i + 2,
+                                            0,
+                                            MPI_COMM_WORLD
+                                            ) != MPI_SUCCESS) {
+                                        perror("Ошибка заключительной передачи работнику.");
+                                    }
+                                }
+                                // необходимо дождаться ответа, иначе эти
+                                // ленивые алкоголики примут ответ после Finalize
+//                                Order finished_order;
+//                                for (int i = 0; i < num_workers; i ++) {
+//                                    MPI_Recv(
+//                                            &finished_order,
+//                                            sizeof(Order),
+//                                            MPI_CHAR,
+//                                            i + 2,
+//                                            0,
+//                                            MPI_COMM_WORLD,
+//                                            MPI_STATUS_IGNORE
+//                                            );
+//                                }
+
+                                sleep(10);
+                                delete [] TABLE;
+                                // ..и остановиться самому
+                                MPI_Finalize();
+                                return;
+                            }
+
+                            // Для RESET нужно очистить свою таблицу
+                            N = 0;
+                            M = 0;
+                            delete [] TABLE;
+
                             break;
                         }
                         default: {
@@ -334,6 +398,16 @@ void CLifeGame::Run(uint32_t steps_num) {
                     perror("Ошибка получения от подмастерья\n");
                 }
 
+                // если пришла фейковая строка,
+                // то это приказ остановиться
+                if (worker_table[0] == '#') {
+                    delete [] worker_table;
+                    MPI_Finalize();
+                    std::cout << "worker was here\n";
+                    fflush(stdout);
+                    return;
+                }
+
                 // считает свою часть
                 char new_worker_table [num_elem_per_worker * M];
                 for (uint32_t i = M; i < M + num_elem_per_worker * M; i ++) {
@@ -356,8 +430,6 @@ void CLifeGame::Run(uint32_t steps_num) {
                     perror("Ошибка передачи работнику\n");
                 }
             }
-            delete [] worker_table;
-            break;
         }
     }
 }
@@ -382,6 +454,7 @@ void CLifeGame::Status() {
             }
             std::cout << "\n";
         }
+        std::cout << "\n";
         return;
     }
     // Запрашиваем статус у подмастерья
@@ -425,3 +498,79 @@ void CLifeGame::Status() {
         std::cout << "\n";
     }
 }
+
+/***
+ * STOP
+ * запускается извне или изнутри
+ * без параметра = обычный STOP,
+ * с параметром отправит подмастерью соответствующую cmd
+ */
+ void CLifeGame::Stop(COMMANDS cmd=STOP) {
+    if (world_id) {                 // обрабатывает только мастер
+        return;
+    }
+    if (!is_game_started) {
+        std::cout << "Игра еще не началась.\n";
+        return;
+    }
+
+    // Этой команды нужно дождаться!
+    Order stop_order(cmd, 0, 0);
+    MPI_Send(
+            &stop_order,
+            sizeof(Order),
+            MPI_CHAR,
+            1,
+            0,
+            MPI_COMM_WORLD
+            );
+
+    // Принимаем ответ о шагах
+    Order sub_answer;
+    MPI_Recv(
+            &sub_answer,
+            sizeof(Order),
+            MPI_CHAR,
+            1,
+            0,
+            MPI_COMM_WORLD,
+            MPI_STATUS_IGNORE
+            );
+
+    std::cout << "С начала игры прошло шагов: " << sub_answer.finished_steps << ".\n";
+    if (sub_answer.new_steps) {
+        std::cout << "Итерация была прервана\n";
+    }
+    else {
+        std::cout << "Все требуемые шаги итерации были выполнены\n";
+    }
+ }
+
+ /***
+  * RESET
+  * аналогично STOP отправит
+  * подмастерью cmd,
+  * очистит параметры игры
+  */
+void CLifeGame::Reset(COMMANDS cmd=RESET) {
+    this->Stop(cmd);
+    // чистим таблицу
+    // и значения
+    delete [] TABLE;
+    N = 0;
+    M = 0;
+    is_game_started = false;
+    is_game_running = false;
+}
+
+/***
+ * QUIT
+ */
+ void CLifeGame::Quit() {
+     // чистим таблицу
+     this->Reset(QUIT);
+     sleep(10);
+     MPI_Finalize();
+    std::cout << "master was here\n";
+    fflush(stdout);
+ }
