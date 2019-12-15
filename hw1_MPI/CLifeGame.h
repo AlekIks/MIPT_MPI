@@ -59,6 +59,9 @@ public:
     void Start(uint32_t N, uint32_t M, const std::string& init_status);
     void Run(uint32_t steps_num);
     void Status();
+    void Reset(COMMANDS cmd);
+    void Stop(COMMANDS cmd);
+    void Quit();
 private:
     static CLifeGame* instance;
 
@@ -68,7 +71,6 @@ private:
     char* TABLE = nullptr;
     uint32_t N = 0, M = 0;
     bool is_game_started = false, is_game_running = false;   // флаги состояния игры
-    uint32_t cur_step = 0;                                   // текущий шаг
 
     ////////////////////////////////////
     /// MPI
