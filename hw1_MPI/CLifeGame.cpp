@@ -256,7 +256,7 @@ void CLifeGame::Run(uint32_t steps_num) {
                         sizeof(Order),              // размер
                         MPI_CHAR,                   // тип
                         0,                   // от кого
-                        MPI_ANY_TAG,                // флаг
+                        0,                // флаг
                         MPI_COMM_WORLD,             // группа
                         &req
                 );
@@ -282,17 +282,16 @@ void CLifeGame::Run(uint32_t steps_num) {
                          * Отправляем таблицу
                          */
                         case STATUS: {
-                            MPI_Request sub_req;
                             // можем выслать статус
-                            MPI_Isend(
-                                    &TABLE,
+                            MPI_Send(
+                                    TABLE,
                                     N * M,
                                     MPI_CHAR,		// тип
                                     0,			// кому шлём
                                     0,			// тэг
-                                    MPI_COMM_WORLD,		// группа
-                                    &sub_req
+                                    MPI_COMM_WORLD		// группа
                             );
+
                         }
                         /***
                          * STOP, RESET, QUIT
@@ -301,7 +300,7 @@ void CLifeGame::Run(uint32_t steps_num) {
                         case STOP || RESET || QUIT: {
                             Order submaster_order(RUN, steps_to_do, cur_step);
                             MPI_Send(
-                                    &TABLE,
+                                    TABLE,
                                     N * M,
                                     MPI_CHAR,		// тип
                                     0,			// кому шлём
@@ -388,7 +387,7 @@ void CLifeGame::Status() {
     // Запрашиваем статус у подмастерья
 
     Order get_status_order(STATUS);
-    MPI_Request req;
+    MPI_Request status_req;
     MPI_Isend(
             &get_status_order,
             sizeof(Order),
@@ -396,35 +395,33 @@ void CLifeGame::Status() {
             1,
             0,
             MPI_COMM_WORLD,
-            &req
-    );
-
-    // Получаем, если можем
-    MPI_Request status_req;
-    MPI_Irecv(
-            &TABLE,
-            N * M,
-            MPI_CHAR,
-            1,
-            0,
-            MPI_COMM_WORLD,
             &status_req
     );
 
-
     int is_status_ready = 0;
-    MPI_Wait(&status_req, MPI_STATUS_IGNORE);
     MPI_Test(&status_req, &is_status_ready, MPI_STATUS_IGNORE);
 
     if (!is_status_ready) {
         std::cout << "В данный момент производится просчет итераций\n";
     }
     else {
+        // можем принять - принимаем
+        MPI_Recv(
+                TABLE,
+                N * M,
+                MPI_CHAR,
+                1,
+                0,
+                MPI_COMM_WORLD,
+                MPI_STATUS_IGNORE
+                );
+
         for (uint32_t i = 0; i < N; i++) {
             for (uint32_t j = 0; j < M; j++) {
                 std::cout << TABLE[i * M + j] << " ";
             }
             std::cout << "\n";
         }
+        std::cout << "\n";
     }
 }
