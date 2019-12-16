@@ -33,10 +33,7 @@ std::map <std::string, COMMANDS> commands = {
 /// Мастер будет отдавать подмастерью приказы
 
 struct Order {
-    Order() = default;
-    Order(COMMANDS command) : command(command) {};
-    Order(COMMANDS command, uint32_t steps) : command(command), new_steps(steps) {};
-    Order(COMMANDS command, uint32_t steps, uint32_t fs) :
+    Order(COMMANDS command = NOCOMMAND, uint32_t steps = 0, uint32_t fs = 0) :
             command(command),
             new_steps(steps),
             finished_steps(fs){};
@@ -70,7 +67,10 @@ private:
 
     char* TABLE = nullptr;
     uint32_t N = 0, M = 0;
-    bool is_game_started = false, is_game_running = false;   // флаги состояния игры
+    // флаги состояния игры
+    bool is_game_started = false;
+    bool is_game_running = false;
+    bool is_game_quit = false;
 
     ////////////////////////////////////
     /// MPI
